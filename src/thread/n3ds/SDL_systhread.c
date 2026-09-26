@@ -54,9 +54,15 @@ int SDL_SYS_CreateThread(SDL_Thread *thread)
 
     svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
 
-    /* prefer putting audio thread on system core */
-    if (thread->name && (SDL_strncmp(thread->name, "SDLAudioP", 9) == 0) && R_SUCCEEDED(APT_SetAppCpuTimeLimit(30))) {
-        cpu = 1;
+    /* Prefer putting audio on the system core. Preserve a larger budget the
+       application has already obtained instead of silently reducing it to
+       30 percent while the audio thread is being created. */
+    if (thread->name && (SDL_strncmp(thread->name, "SDLAudioP", 9) == 0)) {
+        u32 core1_percent = 0;
+        if ((R_SUCCEEDED(APT_GetAppCpuTimeLimit(&core1_percent)) && core1_percent > 0) ||
+            R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))) {
+            cpu = 1;
+        }
     }
 
     thread->handle = threadCreate(ThreadEntry,

@@ -44,6 +44,8 @@ struct SDL_PrivateAudioData
     LightLock lock;
     CondVar cv;
     SDL_bool isCancelled;
+    SDL_bool isSuspended;
+    int pausedBeforeSleep;
 };
 
 #endif /* _SDL_n3dsaudio_h_ */

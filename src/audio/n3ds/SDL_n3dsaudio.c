@@ -51,13 +51,20 @@ static SDL_INLINE void contextUnlock(_THIS)
 
 static void N3DSAUD_DspHook(DSP_HookType hook)
 {
-    if (hook == DSPHOOK_ONCANCEL) {
-        contextLock(audio_device);
+    contextLock(audio_device);
+    if (hook == DSPHOOK_ONSLEEP && !audio_device->hidden->isSuspended) {
+        audio_device->hidden->pausedBeforeSleep = SDL_AtomicGet(&audio_device->paused);
+        audio_device->hidden->isSuspended = SDL_TRUE;
+        SDL_AtomicSet(&audio_device->paused, SDL_TRUE);
+    } else if (hook == DSPHOOK_ONWAKEUP && audio_device->hidden->isSuspended) {
+        audio_device->hidden->isSuspended = SDL_FALSE;
+        SDL_AtomicSet(&audio_device->paused, audio_device->hidden->pausedBeforeSleep);
+    } else if (hook == DSPHOOK_ONCANCEL) {
         audio_device->hidden->isCancelled = SDL_TRUE;
         SDL_AtomicSet(&audio_device->enabled, SDL_FALSE);
-        CondVar_Broadcast(&audio_device->hidden->cv);
-        contextUnlock(audio_device);
     }
+    CondVar_Broadcast(&audio_device->hidden->cv);
+    contextUnlock(audio_device);
 }
 
 static void AudioFrameFinished(void *device)
@@ -192,7 +199,7 @@ static void N3DSAUDIO_PlayDevice(_THIS)
     nextbuf = this->hidden->nextbuf;
     sampleLen = this->hidden->mixlen;
 
-    if (this->hidden->isCancelled ||
+    if (this->hidden->isCancelled || this->hidden->isSuspended ||
         this->hidden->waveBuf[nextbuf].status != NDSP_WBUF_FREE) {
         contextUnlock(this);
         return;
@@ -211,17 +218,31 @@ static void N3DSAUDIO_PlayDevice(_THIS)
 
 static void N3DSAUDIO_WaitDevice(_THIS)
 {
+    SDL_bool suspended;
     contextLock(this);
-    while (!this->hidden->isCancelled &&
-           this->hidden->waveBuf[this->hidden->nextbuf].status != NDSP_WBUF_FREE) {
-        CondVar_Wait(&this->hidden->cv, &this->hidden->lock);
+    while (!this->hidden->isCancelled && !this->hidden->isSuspended &&
+           !SDL_AtomicGet(&this->shutdown)) {
+        ndspWaveBuf *next = &this->hidden->waveBuf[this->hidden->nextbuf];
+        /* Recover a completion even if the callback was interrupted during
+           suspension. Shutdown must not depend on another DSP interrupt. */
+        if (next->status == NDSP_WBUF_DONE) next->status = NDSP_WBUF_FREE;
+        if (next->status == NDSP_WBUF_FREE) break;
+        CondVar_WaitTimeout(&this->hidden->cv, &this->hidden->lock, 20000000);
     }
+    suspended = this->hidden->isSuspended;
     contextUnlock(this);
+    if (suspended && !SDL_AtomicGet(&this->shutdown)) {
+        SDL_Delay((this->spec.samples * 1000) / this->spec.freq);
+    }
 }
 
 static Uint8 *N3DSAUDIO_GetDeviceBuf(_THIS)
 {
-    return this->hidden->mixbuf;
+    Uint8 *buffer;
+    contextLock(this);
+    buffer = this->hidden->isSuspended ? NULL : this->hidden->mixbuf;
+    contextUnlock(this);
+    return buffer;
 }
 
 static void N3DSAUDIO_CloseDevice(_THIS)
